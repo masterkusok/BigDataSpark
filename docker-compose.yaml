@@ -1,0 +1,76 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: bdlab_postgres
+    env_file: .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./source-data:/source-data
+    networks:
+      - bdlab_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d testdb"]
+      interval: 5s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./source-data:/source-data
+      - ./migrations:/migrations
+    command:
+      [
+        "-path",
+        "/migrations",
+        "-database",
+        "postgres://admin:admin@postgres:5432/testdb?sslmode=disable",
+        "up",
+      ]
+    networks:
+      - bdlab_net
+
+  spark:
+    image: jupyter/pyspark-notebook:latest
+    container_name: bdlab_spark
+    env_file: .env
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=bdlab
+      - PYSPARK_SUBMIT_ARGS=--packages org.postgresql:postgresql:42.7.3 pyspark-shell
+    ports:
+      - "8888:8888"
+      - "4040:4040"
+    volumes:
+      - ./:/home/jovyan/work
+      - ./jars:/extra-jars
+    networks:
+      - bdlab_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: bdlab_clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - bdlab_net
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+
+networks:
+  bdlab_net:
+    driver: bridge
