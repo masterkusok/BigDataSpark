@@ -17,6 +17,7 @@ from pyspark.sql.functions import (
 )
 from pyspark.sql.window import Window
 import os
+from py4j.java_gateway import java_import
 
 user = os.environ["POSTGRES_USER"]
 password = os.environ["POSTGRES_PASSWORD"]
@@ -28,22 +29,33 @@ spark = (
     .getOrCreate()
 )
 
-jdbc_url = f"jdbc:postgresql://postgres:5432/{db}"
-
-connection_properties = {
+PG_URL = f"jdbc:postgresql://postgres:5432/{db}"
+PG_PROPS = {
     "user": user,
     "password": password,
     "driver": "org.postgresql.Driver"
 }
 
-mockDataDf = (
-    spark.read
-    .jdbc(
-        url=jdbc_url,
-        table="mock_data",
-        properties=connection_properties
+def _pg_connect():
+    java_import(spark._jvm, "java.sql.DriverManager")
+    return spark._jvm.DriverManager.getConnection(PG_URL, user, password)
+
+def _upsert(df, table, conflict_col):
+    tmp = f"tmp_{table}"
+    df.write.jdbc(PG_URL, tmp, mode="overwrite", properties=PG_PROPS)
+    conn = _pg_connect()
+    stmt = conn.createStatement()
+    cols = ", ".join(df.columns)
+    update_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in df.columns if c != conflict_col)
+    stmt.execute(
+        f"INSERT INTO {table} ({cols}) SELECT {cols} FROM {tmp} "
+        f"ON CONFLICT ({conflict_col}) DO UPDATE SET {update_set}"
     )
-)
+    stmt.execute(f"DROP TABLE IF EXISTS {tmp}")
+    stmt.close()
+    conn.close()
+
+mockDataDf = spark.read.jdbc(PG_URL, "mock_data", properties=PG_PROPS)
 
 dimPetBreedDf = (
     mockDataDf
@@ -338,27 +350,15 @@ factSalesDf = (
     )
 )
 
-tables = [
-    ("dim_pet_breed", dimPetBreedDf),
-    ("dim_customer", dimCustomerDf),
-    ("dim_seller", dimSellerDf),
-    ("dim_supplier", dimSupplierDf),
-    ("dim_store", dimStoreDf),
-    ("dim_pet_category", dimPetCategoryDf),
-    ("dim_product", dimProductDf),
-    ("dim_date", dimDateDf),
-    ("fact_sales", factSalesDf)
-]
+_upsert(dimPetBreedDf, "dim_pet_breed", "breed_name")
+_upsert(dimCustomerDf, "dim_customer", "customer_id")
+_upsert(dimSellerDf, "dim_seller", "seller_id")
+_upsert(dimSupplierDf, "dim_supplier", "supplier_id")
+_upsert(dimStoreDf, "dim_store", "store_id")
+_upsert(dimPetCategoryDf, "dim_pet_category", "category_name")
+_upsert(dimProductDf, "dim_product", "product_id")
+_upsert(dimDateDf, "dim_date", "date_id")
 
-for tableName, df in tables:
-    (
-        df.write
-        .mode("overwrite")
-        .jdbc(
-            url=jdbc_url,
-            table=tableName,
-            properties=connection_properties
-        )
-    )
+factSalesDf.write.jdbc(PG_URL, "fact_sales", mode="append", properties=PG_PROPS)
 
 print("DWH ETL completed successfully")
